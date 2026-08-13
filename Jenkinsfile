@@ -6,6 +6,7 @@ pipeline {
         stage('Test') {
             steps {
                 echo '===== Running Application Test ====='
+
                 sh 'python3 --version'
                 sh 'python3 -m py_compile app.py'
             }
@@ -14,6 +15,7 @@ pipeline {
         stage('Docker Build') {
             steps {
                 echo '===== Building Docker Image ====='
+
                 sh 'docker build -t devops-backend:test .'
             }
         }
@@ -47,8 +49,45 @@ pipeline {
             post {
                 always {
                     echo '===== Cleaning Test Container ====='
-                    sh 'docker rm -f devops-backend-test 2>/dev/null || true'
+
+                    sh '''
+                        docker rm -f devops-backend-test 2>/dev/null || true
+                    '''
                 }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo '===== Deploying Application with Docker Compose ====='
+
+                sh '''
+                    docker compose down
+
+                    docker compose up -d --build
+                '''
+            }
+        }
+
+        stage('Deployment Health Check') {
+            steps {
+                echo '===== Waiting for Deployment ====='
+
+                sh '''
+                    sleep 10
+                '''
+
+                echo '===== Checking Deployment ====='
+
+                sh '''
+                    docker compose ps
+                '''
+
+                echo '===== Testing Production Health Endpoint ====='
+
+                sh '''
+                    curl -f http://127.0.0.1:8080/health
+                '''
             }
         }
     }
