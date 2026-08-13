@@ -14,7 +14,7 @@ pipeline {
         stage('Docker Build') {
             steps {
                 echo '===== Building Docker Image ====='
-                sh 'docker compose build'
+                sh 'docker build -t devops-backend:test .'
             }
         }
 
