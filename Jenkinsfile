@@ -16,7 +16,9 @@ pipeline {
             steps {
                 echo '===== Building Docker Image ====='
 
-                sh 'docker build -t devops-backend:test .'
+                sh '''
+                    docker build -t devops-backend:test .
+                '''
             }
         }
 
@@ -57,13 +59,41 @@ pipeline {
             }
         }
 
+        stage('Docker Push') {
+            steps {
+                echo '===== Pushing Docker Image to Docker Hub ====='
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | docker login \
+                          --username "$DOCKER_USERNAME" \
+                          --password-stdin
+
+                        docker tag \
+                          devops-backend:test \
+                          $DOCKER_USERNAME/devops-3tier-backend:latest
+
+                        docker push \
+                          $DOCKER_USERNAME/devops-3tier-backend:latest
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
         stage('Deploy') {
             steps {
                 echo '===== Deploying Application with Docker Compose ====='
 
                 sh '''
                     docker compose down
-
                     docker compose up -d --build
                 '''
             }
