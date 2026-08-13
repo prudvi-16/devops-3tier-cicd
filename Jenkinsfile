@@ -1,6 +1,10 @@
 pipeline {
     agent any
 
+    environment {
+        DOCKER_IMAGE = 'prudvik2026/devops-backend'
+    }
+
     stages {
 
         stage('Test') {
@@ -17,7 +21,9 @@ pipeline {
                 echo '===== Building Docker Image ====='
 
                 sh '''
-                    docker build -t devops-backend:test .
+                    docker build \
+                      -t ${DOCKER_IMAGE}:test \
+                      .
                 '''
             }
         }
@@ -32,14 +38,12 @@ pipeline {
                     docker run -d \
                       --name devops-backend-test \
                       -p 5000:5000 \
-                      devops-backend:test
+                      ${DOCKER_IMAGE}:test
                 '''
 
                 echo '===== Waiting for Application ====='
 
-                sh '''
-                    sleep 5
-                '''
+                sh 'sleep 5'
 
                 echo '===== Testing Health Endpoint ====='
 
@@ -70,17 +74,25 @@ pipeline {
                         passwordVariable: 'DOCKER_PASSWORD'
                     )
                 ]) {
+
                     sh '''
                         echo "$DOCKER_PASSWORD" | docker login \
                           --username "$DOCKER_USERNAME" \
                           --password-stdin
 
                         docker tag \
-                          devops-backend:test \
-                          $DOCKER_USERNAME/devops-3tier-backend:latest
+                          ${DOCKER_IMAGE}:test \
+                          ${DOCKER_IMAGE}:${BUILD_NUMBER}
+
+                        docker tag \
+                          ${DOCKER_IMAGE}:test \
+                          ${DOCKER_IMAGE}:latest
 
                         docker push \
-                          $DOCKER_USERNAME/devops-3tier-backend:latest
+                          ${DOCKER_IMAGE}:${BUILD_NUMBER}
+
+                        docker push \
+                          ${DOCKER_IMAGE}:latest
 
                         docker logout
                     '''
@@ -90,11 +102,14 @@ pipeline {
 
         stage('Deploy') {
             steps {
-                echo '===== Deploying Application with Docker Compose ====='
+                echo '===== Deploying Docker Hub Image ====='
 
                 sh '''
                     docker compose down
-                    docker compose up -d --build
+
+                    docker compose pull
+
+                    docker compose up -d
                 '''
             }
         }
@@ -103,9 +118,7 @@ pipeline {
             steps {
                 echo '===== Waiting for Deployment ====='
 
-                sh '''
-                    sleep 10
-                '''
+                sh 'sleep 10'
 
                 echo '===== Checking Deployment ====='
 
