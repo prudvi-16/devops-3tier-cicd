@@ -22,8 +22,7 @@ pipeline {
 
                 sh '''
                     docker build \
-                      -t ${DOCKER_IMAGE}:test \
-                      .
+                        -t ${DOCKER_IMAGE}:test .
                 '''
             }
         }
@@ -36,9 +35,9 @@ pipeline {
                     docker rm -f devops-backend-test 2>/dev/null || true
 
                     docker run -d \
-                      --name devops-backend-test \
-                      -p 5000:5000 \
-                      ${DOCKER_IMAGE}:test
+                        --name devops-backend-test \
+                        -p 5000:5000 \
+                        ${DOCKER_IMAGE}:test
                 '''
 
                 echo '===== Waiting for Application ====='
@@ -77,22 +76,28 @@ pipeline {
 
                     sh '''
                         echo "$DOCKER_PASSWORD" | docker login \
-                          --username "$DOCKER_USERNAME" \
-                          --password-stdin
+                            --username "$DOCKER_USERNAME" \
+                            --password-stdin
+
+                        echo "===== Tagging Docker Images ====="
 
                         docker tag \
-                          ${DOCKER_IMAGE}:test \
-                          ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                            ${DOCKER_IMAGE}:test \
+                            ${DOCKER_IMAGE}:${BUILD_NUMBER}
 
                         docker tag \
-                          ${DOCKER_IMAGE}:test \
-                          ${DOCKER_IMAGE}:latest
+                            ${DOCKER_IMAGE}:test \
+                            ${DOCKER_IMAGE}:latest
+
+                        echo "===== Pushing Build ${BUILD_NUMBER} ====="
 
                         docker push \
-                          ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                            ${DOCKER_IMAGE}:${BUILD_NUMBER}
+
+                        echo "===== Pushing Latest Image ====="
 
                         docker push \
-                          ${DOCKER_IMAGE}:latest
+                            ${DOCKER_IMAGE}:latest
 
                         docker logout
                     '''
@@ -105,9 +110,15 @@ pipeline {
                 echo '===== Deploying Docker Hub Image ====='
 
                 sh '''
+                    echo "===== Stopping Existing Deployment ====="
+
                     docker compose down
 
+                    echo "===== Pulling Latest Docker Hub Images ====="
+
                     docker compose pull
+
+                    echo "===== Starting Application ====="
 
                     docker compose up -d
                 '''
@@ -116,20 +127,45 @@ pipeline {
 
         stage('Deployment Health Check') {
             steps {
-                echo '===== Waiting for Deployment ====='
-
-                sh 'sleep 10'
-
-                echo '===== Checking Deployment ====='
+                echo '===== Verifying Production Deployment ====='
 
                 sh '''
+                    echo "===== Current Containers ====="
+
                     docker compose ps
-                '''
 
-                echo '===== Testing Production Health Endpoint ====='
+                    echo "===== Waiting for Backend Health ====="
 
-                sh '''
-                    curl -f http://127.0.0.1:8080/health
+                    for i in 1 2 3 4 5 6
+                    do
+                        echo "Health check attempt $i/6"
+
+                        if curl -fsS http://127.0.0.1:8080/health
+                        then
+                            echo ""
+                            echo "===== BACKEND HEALTH CHECK PASSED ====="
+                            exit 0
+                        fi
+
+                        echo "Backend is not ready yet..."
+                        sleep 5
+                    done
+
+                    echo "===== BACKEND HEALTH CHECK FAILED ====="
+
+                    echo "===== Docker Compose Status ====="
+
+                    docker compose ps
+
+                    echo "===== Backend Logs ====="
+
+                    docker compose logs --tail=50 backend
+
+                    echo "===== Database Logs ====="
+
+                    docker compose logs --tail=50 db
+
+                    exit 1
                 '''
             }
         }
@@ -137,11 +173,21 @@ pipeline {
 
     post {
         success {
+            echo '========================================='
             echo '===== PIPELINE SUCCESS ====='
+            echo '========================================='
+            echo "Docker Image: ${DOCKER_IMAGE}:${BUILD_NUMBER}"
+            echo "Docker Image: ${DOCKER_IMAGE}:latest"
         }
 
         failure {
+            echo '========================================='
             echo '===== PIPELINE FAILED ====='
+            echo '========================================='
+        }
+
+        always {
+            echo '===== Pipeline Execution Completed ====='
         }
     }
 }
