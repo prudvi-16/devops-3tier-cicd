@@ -233,7 +233,7 @@ EOF
                         credentialsId: 'db-credentials',
                         usernameVariable: 'POSTGRES_USER_SECRET',
                         passwordVariable: 'POSTGRES_PASSWORD_SECRET'
- B                   )
+                        )
                 ]) {
 
                     sh '''
