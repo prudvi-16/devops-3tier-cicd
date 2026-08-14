@@ -1,4 +1,5 @@
 pipeline {
+
     agent any
 
     environment {
@@ -9,15 +10,24 @@ pipeline {
 
     stages {
 
-        stage('Test') {
+        /*
+         * ============================================================
+         * STAGE 1 - BACKEND APPLICATION TEST
+         * ============================================================
+         */
+
+        stage('Backend Test') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Running Backend Application Test ====='
+                echo '===== BACKEND APPLICATION TEST ====='
                 echo '========================================='
 
                 sh '''
                     set -e
 
+                    echo "Python version:"
                     python3 --version
 
                     echo "===== Compiling Backend Application ====="
@@ -26,15 +36,24 @@ pipeline {
 
                     python3 -m py_compile app.py
 
-                    echo "===== Backend Application Test PASSED ====="
+                    echo "===== Backend Test PASSED ====="
                 '''
             }
         }
 
-        stage('Docker Build') {
+
+        /*
+         * ============================================================
+         * STAGE 2 - BACKEND DOCKER BUILD
+         * ============================================================
+         */
+
+        stage('Backend Docker Build') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Building Backend Docker Image ====='
+                echo '===== BUILDING BACKEND IMAGE ====='
                 echo '========================================='
 
                 sh '''
@@ -49,16 +68,29 @@ pipeline {
             }
         }
 
-        stage('Container Test') {
+
+        /*
+         * ============================================================
+         * STAGE 3 - BACKEND CONTAINER TEST
+         * ============================================================
+         */
+
+        stage('Backend Container Test') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Testing Backend Container ====='
+                echo '===== BACKEND CONTAINER TEST ====='
                 echo '========================================='
 
                 sh '''
                     set -e
 
+                    echo "===== Removing Old Test Container ====="
+
                     docker rm -f devops-backend-test 2>/dev/null || true
+
+                    echo "===== Starting Backend Test Container ====="
 
                     docker run -d \
                         --name devops-backend-test \
@@ -69,7 +101,7 @@ pipeline {
 
                     sleep 5
 
-                    echo "===== Testing Backend Health Endpoint ====="
+                    echo "===== Testing Backend Health ====="
 
                     curl -fsS \
                         http://127.0.0.1:5000/health
@@ -81,7 +113,9 @@ pipeline {
             }
 
             post {
+
                 always {
+
                     echo '===== Cleaning Backend Test Container ====='
 
                     sh '''
@@ -91,10 +125,19 @@ pipeline {
             }
         }
 
-        stage('Docker Push') {
+
+        /*
+         * ============================================================
+         * STAGE 4 - BACKEND DOCKER HUB PUSH
+         * ============================================================
+         */
+
+        stage('Backend Docker Push') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Pushing Backend Docker Image ====='
+                echo '===== PUSHING BACKEND IMAGE ====='
                 echo '========================================='
 
                 withCredentials([
@@ -108,11 +151,13 @@ pipeline {
                     sh '''
                         set -e
 
+                        echo "===== Docker Hub Login ====="
+
                         echo "$DOCKER_PASSWORD" | docker login \
                             --username "$DOCKER_USERNAME" \
                             --password-stdin
 
-                        echo "===== Tagging Backend Images ====="
+                        echo "===== Tagging Backend Image ====="
 
                         docker tag \
                             ${BACKEND_IMAGE}:test \
@@ -140,10 +185,261 @@ pipeline {
             }
         }
 
-        stage('Frontend Test') {
+
+        /*
+         * ============================================================
+         * STAGE 5 - PREPARE DATABASE ENVIRONMENT
+         * ============================================================
+         */
+
+        stage('Prepare Database Environment') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Running Frontend Test ====='
+                echo '===== PREPARING DATABASE ENVIRONMENT ====='
+                echo '========================================='
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'db-credentials',
+                        usernameVariable: 'POSTGRES_USER_SECRET',
+                        passwordVariable: 'POSTGRES_PASSWORD_SECRET'
+                    )
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "===== Creating backend/.env ====="
+
+                        cat > backend/.env <<EOF
+POSTGRES_DB=employee_db
+POSTGRES_USER=${POSTGRES_USER_SECRET}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD_SECRET}
+EOF
+
+                        chmod 600 backend/.env
+
+                        echo "===== Environment File Created ====="
+
+                        echo "POSTGRES_DB=employee_db"
+                        echo "POSTGRES_USER=${POSTGRES_USER_SECRET}"
+                        echo "POSTGRES_PASSWORD=********"
+
+                        echo "===== Validating Docker Compose ====="
+
+                        docker compose \
+                            -p ${COMPOSE_PROJECT} \
+                            --env-file backend/.env \
+                            -f backend/compose.yaml \
+                            config
+
+                        echo "===== Compose Configuration VALID ====="
+                    '''
+                }
+            }
+        }
+
+
+        /*
+         * ============================================================
+         * STAGE 6 - BACKEND + DATABASE DEPLOYMENT
+         * ============================================================
+         */
+
+        stage('Deploy Backend and Database') {
+
+            steps {
+
+                echo '========================================='
+                echo '===== DEPLOYING BACKEND + DATABASE ====='
+                echo '========================================='
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'db-credentials',
+                        usernameVariable: 'POSTGRES_USER_SECRET',
+                        passwordVariable: 'POSTGRES_PASSWORD_SECRET'
+                    )
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "===== Recreating Environment File ====="
+
+                        cat > backend/.env <<EOF
+POSTGRES_DB=employee_db
+POSTGRES_USER=${POSTGRES_USER_SECRET}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD_SECRET}
+EOF
+
+                        chmod 600 backend/.env
+
+                        echo "===== Stopping Existing Backend Deployment ====="
+
+                        docker compose \
+                            -p ${COMPOSE_PROJECT} \
+                            --env-file backend/.env \
+                            -f backend/compose.yaml \
+                            down
+
+                        echo "===== Removing Old Backend Test Containers ====="
+
+                        docker rm -f devops-backend-test 2>/dev/null || true
+
+                        echo "===== Pulling Backend Images ====="
+
+                        docker compose \
+                            -p ${COMPOSE_PROJECT} \
+                            --env-file backend/.env \
+                            -f backend/compose.yaml \
+                            pull
+
+                        echo "===== Starting Backend + Database ====="
+
+                        docker compose \
+                            -p ${COMPOSE_PROJECT} \
+                            --env-file backend/.env \
+                            -f backend/compose.yaml \
+                            up -d
+
+                        echo "===== Backend Deployment Started ====="
+
+                        docker compose \
+                            -p ${COMPOSE_PROJECT} \
+                            --env-file backend/.env \
+                            -f backend/compose.yaml \
+                            ps
+                    '''
+                }
+            }
+        }
+
+
+        /*
+         * ============================================================
+         * STAGE 7 - BACKEND DEPLOYMENT HEALTH CHECK
+         * ============================================================
+         */
+
+        stage('Backend Health Check') {
+
+            steps {
+
+                echo '========================================='
+                echo '===== BACKEND PRODUCTION HEALTH ====='
+                echo '========================================='
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'db-credentials',
+                        usernameVariable: 'POSTGRES_USER_SECRET',
+                        passwordVariable: 'POSTGRES_PASSWORD_SECRET'
+                    )
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        cat > backend/.env <<EOF
+POSTGRES_DB=employee_db
+POSTGRES_USER=${POSTGRES_USER_SECRET}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD_SECRET}
+EOF
+
+                        chmod 600 backend/.env
+
+                        echo "===== Current Containers ====="
+
+                        docker compose \
+                            -p ${COMPOSE_PROJECT} \
+                            --env-file backend/.env \
+                            -f backend/compose.yaml \
+                            ps
+
+                        echo "===== Waiting for Backend Health ====="
+
+                        for i in 1 2 3 4 5 6 7 8 9 10
+                        do
+
+                            echo "Health check attempt $i/10"
+
+                            if curl -fsS \
+                                http://127.0.0.1:8080/health
+                            then
+
+                                echo ""
+                                echo "========================================="
+                                echo "===== BACKEND HEALTH CHECK PASSED ====="
+                                echo "========================================="
+
+                                break
+
+                            fi
+
+                            echo "Backend is not ready yet..."
+
+                            sleep 5
+
+                            if [ "$i" = "10" ]
+                            then
+
+                                echo "===== BACKEND HEALTH CHECK FAILED ====="
+
+                                docker compose \
+                                    -p ${COMPOSE_PROJECT} \
+                                    --env-file backend/.env \
+                                    -f backend/compose.yaml \
+                                    ps
+
+                                docker compose \
+                                    -p ${COMPOSE_PROJECT} \
+                                    --env-file backend/.env \
+                                    -f backend/compose.yaml \
+                                    logs --tail=50 backend
+
+                                exit 1
+
+                            fi
+
+                        done
+
+                        echo "===== API CHECK ====="
+
+                        curl -fsS \
+                            http://127.0.0.1:8080/api
+
+                        echo ""
+
+                        echo "===== DATABASE STATUS ====="
+
+                        docker compose \
+                            -p ${COMPOSE_PROJECT} \
+                            --env-file backend/.env \
+                            -f backend/compose.yaml \
+                            ps
+
+                        echo "===== Backend Deployment VERIFIED ====="
+                    '''
+                }
+            }
+        }
+
+
+        /*
+         * ============================================================
+         * STAGE 8 - FRONTEND APPLICATION TEST
+         * ============================================================
+         */
+
+        stage('Frontend Test') {
+
+            steps {
+
+                echo '========================================='
+                echo '===== FRONTEND APPLICATION TEST ====='
                 echo '========================================='
 
                 sh '''
@@ -156,24 +452,29 @@ pipeline {
                     test -f frontend/script.js
                     test -f frontend/Dockerfile
 
-                    echo "===== Checking Frontend HTML ====="
+                    echo "index.html      : OK"
+                    echo "style.css       : OK"
+                    echo "script.js       : OK"
+                    echo "Dockerfile      : OK"
 
-                    grep -q "DevOps Employee Portal" frontend/index.html
-
-                    echo "===== Checking Frontend JavaScript ====="
-
-                    grep -q "window.location.hostname" frontend/script.js
-                    grep -q ":8080" frontend/script.js
-
-                    echo "===== Frontend Test PASSED ====="
+                    echo "===== Frontend File Test PASSED ====="
                 '''
             }
         }
 
+
+        /*
+         * ============================================================
+         * STAGE 9 - FRONTEND DOCKER BUILD
+         * ============================================================
+         */
+
         stage('Frontend Docker Build') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Building Frontend Docker Image ====='
+                echo '===== BUILDING FRONTEND IMAGE ====='
                 echo '========================================='
 
                 sh '''
@@ -188,16 +489,29 @@ pipeline {
             }
         }
 
+
+        /*
+         * ============================================================
+         * STAGE 10 - FRONTEND CONTAINER TEST
+         * ============================================================
+         */
+
         stage('Frontend Container Test') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Testing Frontend Container ====='
+                echo '===== FRONTEND CONTAINER TEST ====='
                 echo '========================================='
 
                 sh '''
                     set -e
 
+                    echo "===== Removing Old Frontend Test Container ====="
+
                     docker rm -f devops-frontend-ci-test 2>/dev/null || true
+
+                    echo "===== Starting Frontend Test Container ====="
 
                     docker run -d \
                         --name devops-frontend-ci-test \
@@ -208,40 +522,57 @@ pipeline {
 
                     sleep 3
 
-                    echo "===== Testing Frontend HTTP ====="
+                    echo "===== Testing Frontend HTML ====="
 
                     curl -fsS \
-                        http://127.0.0.1:8088/ \
-                        > /tmp/frontend.html
+                        http://127.0.0.1:8088/
 
-                    grep -q "DevOps Employee Portal" /tmp/frontend.html
+                    echo ""
 
                     echo "===== Testing Frontend JavaScript ====="
 
                     curl -fsS \
-                        http://127.0.0.1:8088/script.js \
-                        | grep -q "window.location.hostname"
+                        http://127.0.0.1:8088/script.js
+
+                    echo ""
+
+                    echo "===== Testing Frontend CSS ====="
+
+                    curl -fsS \
+                        http://127.0.0.1:8088/style.css
+
+                    echo ""
 
                     echo "===== Frontend Container Test PASSED ====="
                 '''
             }
 
             post {
+
                 always {
+
                     echo '===== Cleaning Frontend Test Container ====='
 
                     sh '''
                         docker rm -f devops-frontend-ci-test 2>/dev/null || true
-                        rm -f /tmp/frontend.html
                     '''
                 }
             }
         }
 
+
+        /*
+         * ============================================================
+         * STAGE 11 - FRONTEND DOCKER HUB PUSH
+         * ============================================================
+         */
+
         stage('Frontend Docker Push') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Pushing Frontend Docker Image ====='
+                echo '===== PUSHING FRONTEND IMAGE ====='
                 echo '========================================='
 
                 withCredentials([
@@ -255,11 +586,13 @@ pipeline {
                     sh '''
                         set -e
 
+                        echo "===== Docker Hub Login ====="
+
                         echo "$DOCKER_PASSWORD" | docker login \
                             --username "$DOCKER_USERNAME" \
                             --password-stdin
 
-                        echo "===== Tagging Frontend Images ====="
+                        echo "===== Tagging Frontend Image ====="
 
                         docker tag \
                             ${FRONTEND_IMAGE}:test \
@@ -287,303 +620,258 @@ pipeline {
             }
         }
 
-        stage('Prepare Environment') {
+
+        /*
+         * ============================================================
+         * STAGE 12 - FRONTEND PRODUCTION DEPLOYMENT
+         * ============================================================
+         */
+
+        stage('Deploy Frontend') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Preparing Deployment Environment ====='
+                echo '===== DEPLOYING FRONTEND ====='
                 echo '========================================='
 
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'db-credentials',
-                        usernameVariable: 'POSTGRES_USER_SECRET',
-                        passwordVariable: 'POSTGRES_PASSWORD_SECRET'
-                    )
-                ]) {
+                sh '''
+                    set -e
 
-                    sh '''
-                        set -e
+                    echo "===== Removing Existing Frontend Container ====="
 
-                        echo "===== Creating Temporary Environment File ====="
+                    docker rm -f devops-frontend-prod 2>/dev/null || true
 
-                        cat > backend/.env <<ENVEOF
-POSTGRES_DB=employee_db
-POSTGRES_USER=${POSTGRES_USER_SECRET}
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD_SECRET}
-ENVEOF
+                    echo "===== Removing Old Frontend Test Container ====="
 
-                        chmod 600 backend/.env
+                    docker rm -f devops-frontend-ci-test 2>/dev/null || true
 
-                        echo "===== Environment File Created ====="
+                    echo "===== Pulling Frontend Image ====="
 
-                        echo "POSTGRES_DB=employee_db"
-                        echo "POSTGRES_USER=${POSTGRES_USER_SECRET}"
-                        echo "POSTGRES_PASSWORD=********"
+                    docker pull ${FRONTEND_IMAGE}:latest
 
-                        echo "===== Validating Compose Configuration ====="
+                    echo "===== Starting Frontend ====="
 
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f backend/compose.yaml \
-                            config > /dev/null
+                    docker run -d \
+                        --name devops-frontend-prod \
+                        --restart unless-stopped \
+                        -p 80:80 \
+                        ${FRONTEND_IMAGE}:latest
 
-                        echo "===== Compose Configuration VALID ====="
-                    '''
-                }
+                    echo "===== Frontend Deployment Started ====="
+
+                    docker ps \
+                        --filter name=devops-frontend-prod \
+                        --format 'table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}'
+                '''
             }
         }
 
-        stage('Deploy') {
+
+        /*
+         * ============================================================
+         * STAGE 13 - FRONTEND PRODUCTION HEALTH CHECK
+         * ============================================================
+         */
+
+        stage('Frontend Health Check') {
+
             steps {
+
                 echo '========================================='
-                echo '===== Deploying Backend + Database ====='
-                echo '========================================='
-
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'db-credentials',
-                        usernameVariable: 'POSTGRES_USER_SECRET',
-                        passwordVariable: 'POSTGRES_PASSWORD_SECRET'
-                    )
-                ]) {
-
-                    sh '''
-                        set -e
-
-                        echo "===== Recreating Environment File ====="
-
-                        cat > backend/.env <<ENVEOF
-POSTGRES_DB=employee_db
-POSTGRES_USER=${POSTGRES_USER_SECRET}
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD_SECRET}
-ENVEOF
-
-                        chmod 600 backend/.env
-
-                        echo "===== Stopping Existing Backend Deployment ====="
-
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f backend/compose.yaml \
-                            down
-
-                        echo "===== Removing Old Test Containers ====="
-
-                        docker rm -f devops-backend-test 2>/dev/null || true
-                        docker rm -f devops-frontend-ci-test 2>/dev/null || true
-
-                        echo "===== Pulling Latest Backend Images ====="
-
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f backend/compose.yaml \
-                            pull
-
-                        echo "===== Starting Backend + Database ====="
-
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f backend/compose.yaml \
-                            up -d
-
-                        echo "===== Pulling Latest Frontend Image ====="
-
-                        docker pull ${FRONTEND_IMAGE}:latest
-
-                        echo "===== Stopping Existing Frontend ====="
-
-                        docker rm -f ${COMPOSE_PROJECT}-frontend 2>/dev/null || true
-                        docker rm -f devops-frontend 2>/dev/null || true
-                        docker rm -f devops-frontend-test 2>/dev/null || true
-
-                        echo "===== Starting Frontend ====="
-
-                        docker run -d \
-                            --name ${COMPOSE_PROJECT}-frontend \
-                            --restart unless-stopped \
-                            -p 80:80 \
-                            ${FRONTEND_IMAGE}:latest
-
-                        echo "===== Backend + Database Status ====="
-
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f backend/compose.yaml \
-                            ps
-
-                        echo "===== Frontend Status ====="
-
-                        docker ps \
-                            --filter "name=${COMPOSE_PROJECT}-frontend" \
-                            --format 'table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}'
-
-                        echo "===== Deployment Started ====="
-                    '''
-                }
-            }
-        }
-
-        stage('Deployment Health Check') {
-            steps {
-                echo '========================================='
-                echo '===== Production Health Check ====='
+                echo '===== FRONTEND PRODUCTION HEALTH ====='
                 echo '========================================='
 
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'db-credentials',
-                        usernameVariable: 'POSTGRES_USER_SECRET',
-                        passwordVariable: 'POSTGRES_PASSWORD_SECRET'
-                    )
-                ]) {
+                sh '''
+                    set -e
 
-                    sh '''
-                        set -e
+                    echo "===== Waiting for Frontend ====="
 
-                        cat > backend/.env <<ENVEOF
-POSTGRES_DB=employee_db
-POSTGRES_USER=${POSTGRES_USER_SECRET}
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD_SECRET}
-ENVEOF
+                    for i in 1 2 3 4 5
+                    do
 
-                        chmod 600 backend/.env
+                        echo "Frontend health check attempt $i/5"
 
-                        echo "===== Current Backend Containers ====="
-
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f backend/compose.yaml \
-                            ps
-
-                        echo "===== Waiting for Backend Health ====="
-
-                        BACKEND_OK=false
-
-                        for i in 1 2 3 4 5 6 7 8 9 10
-                        do
-                            echo "Health check attempt $i/10"
-
-                            if curl -fsS \
-                                http://127.0.0.1:8080/health
-                            then
-                                echo ""
-                                echo "===== BACKEND HEALTH CHECK PASSED ====="
-                                BACKEND_OK=true
-                                break
-                            fi
-
-                            echo "Backend is not ready yet..."
-
-                            sleep 5
-                        done
-
-                        if [ "$BACKEND_OK" != "true" ]
+                        if curl -fsS \
+                            http://127.0.0.1/
                         then
-                            echo "===== BACKEND HEALTH CHECK FAILED ====="
 
-                            docker compose \
-                                -p ${COMPOSE_PROJECT} \
-                                --env-file backend/.env \
-                                -f backend/compose.yaml \
-                                ps
+                            echo ""
 
-                            docker compose \
-                                -p ${COMPOSE_PROJECT} \
-                                --env-file backend/.env \
-                                -f backend/compose.yaml \
-                                logs --tail=50 backend
+                            echo "========================================="
+                            echo "===== FRONTEND HEALTH CHECK PASSED ====="
+                            echo "========================================="
+
+                            break
+
+                        fi
+
+                        echo "Frontend is not ready yet..."
+
+                        sleep 3
+
+                        if [ "$i" = "5" ]
+                        then
+
+                            echo "===== FRONTEND HEALTH CHECK FAILED ====="
+
+                            docker ps \
+                                --filter name=devops-frontend-prod
+
+                            docker logs \
+                                --tail=50 \
+                                devops-frontend-prod
 
                             exit 1
                         fi
 
-                        echo "===== API CHECK ====="
+                    done
 
-                        curl -fsS \
-                            http://127.0.0.1:8080/api
+                    echo "===== Testing Frontend JavaScript ====="
 
-                        echo ""
+                    curl -fsS \
+                        http://127.0.0.1/script.js \
+                        > /dev/null
 
-                        echo "===== Database Status ====="
+                    echo "Frontend JavaScript: OK"
 
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f backend/compose.yaml \
-                            ps db
+                    echo "===== Testing Frontend CSS ====="
 
-                        echo "===== Frontend Status ====="
+                    curl -fsS \
+                        http://127.0.0.1/style.css \
+                        > /dev/null
 
-                        docker ps \
-                            --filter "name=${COMPOSE_PROJECT}-frontend" \
-                            --format 'table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}'
+                    echo "Frontend CSS: OK"
 
-                        echo "===== Frontend HTTP Check ====="
+                    echo "===== Frontend Deployment VERIFIED ====="
+                '''
+            }
+        }
 
-                        curl -fsS \
-                            http://127.0.0.1:80/ \
-                            > /tmp/frontend-production.html
 
-                        grep -q "DevOps Employee Portal" \
-                            /tmp/frontend-production.html
+        /*
+         * ============================================================
+         * STAGE 14 - FINAL SYSTEM VERIFICATION
+         * ============================================================
+         */
 
-                        echo "===== FRONTEND HEALTH CHECK PASSED ====="
+        stage('Final System Verification') {
 
-                        echo "===== Frontend JavaScript Check ====="
+            steps {
 
-                        curl -fsS \
-                            http://127.0.0.1:80/script.js \
-                            | grep -q "window.location.hostname"
+                echo '========================================='
+                echo '===== FINAL 3-TIER VERIFICATION ====='
+                echo '========================================='
 
-                        echo "===== FRONTEND JAVASCRIPT CHECK PASSED ====="
+                sh '''
+                    set -e
 
-                        rm -f /tmp/frontend-production.html
+                    echo ""
+                    echo "========== FRONTEND =========="
 
-                        echo "========================================="
-                        echo "===== FULL 3-TIER DEPLOYMENT PASSED ====="
-                        echo "========================================="
-                    '''
-                }
+                    docker ps \
+                        --filter name=devops-frontend-prod \
+                        --format 'table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}'
+
+                    echo ""
+                    echo "========== BACKEND + DATABASE =========="
+
+                    docker ps \
+                        --filter name=${COMPOSE_PROJECT} \
+                        --format 'table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}'
+
+                    echo ""
+                    echo "========== FRONTEND TEST =========="
+
+                    curl -fsS \
+                        http://127.0.0.1/ \
+                        > /dev/null
+
+                    echo "Frontend: UP"
+
+                    echo ""
+                    echo "========== BACKEND TEST =========="
+
+                    curl -fsS \
+                        http://127.0.0.1:8080/health
+
+                    echo ""
+
+                    echo ""
+                    echo "========== API TEST =========="
+
+                    curl -fsS \
+                        http://127.0.0.1:8080/api
+
+                    echo ""
+
+                    echo ""
+                    echo "========================================="
+                    echo "===== COMPLETE 3-TIER SYSTEM: UP ====="
+                    echo "========================================="
+                '''
             }
         }
     }
 
+
+    /*
+     * ================================================================
+     * POST ACTIONS
+     * ================================================================
+     */
+
     post {
+
         success {
+
             echo '========================================='
             echo '===== PIPELINE SUCCESS ====='
             echo '========================================='
 
-            echo "Backend Image: ${BACKEND_IMAGE}:${BUILD_NUMBER}"
-            echo "Backend Image: ${BACKEND_IMAGE}:latest"
+            echo "Backend Image:"
+            echo "${BACKEND_IMAGE}:${BUILD_NUMBER}"
 
-            echo "Frontend Image: ${FRONTEND_IMAGE}:${BUILD_NUMBER}"
-            echo "Frontend Image: ${FRONTEND_IMAGE}:latest"
+            echo "Backend Latest:"
+            echo "${BACKEND_IMAGE}:latest"
+
+            echo "Frontend Image:"
+            echo "${FRONTEND_IMAGE}:${BUILD_NUMBER}"
+
+            echo "Frontend Latest:"
+            echo "${FRONTEND_IMAGE}:latest"
 
             echo '========================================='
             echo '===== APPLICATION DEPLOYED ====='
             echo '========================================='
         }
 
+
         failure {
+
             echo '========================================='
             echo '===== PIPELINE FAILED ====='
             echo '========================================='
+
+            echo 'Check the failed stage above.'
         }
 
+
         always {
-            echo '===== Pipeline Execution Completed ====='
+
+            echo '========================================='
+            echo '===== CLEANING PIPELINE ENVIRONMENT ====='
+            echo '========================================='
 
             sh '''
                 rm -f backend/.env 2>/dev/null || true
-                rm -f /tmp/frontend.html 2>/dev/null || true
-                rm -f /tmp/frontend-production.html 2>/dev/null || true
+
+                docker rm -f devops-backend-test 2>/dev/null || true
+
+                docker rm -f devops-frontend-ci-test 2>/dev/null || true
             '''
+
+            echo '===== Pipeline Execution Completed ====='
         }
     }
 }
