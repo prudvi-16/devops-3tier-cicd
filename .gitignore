@@ -1,6 +1,4 @@
 backend/.env
-backend/venv/
 backend/__pycache__/
 *.pyc
-*.backup
-*.save
+__pycache__/
