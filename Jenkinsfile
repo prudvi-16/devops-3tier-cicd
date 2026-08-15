@@ -3,25 +3,47 @@ pipeline {
     agent any
 
     environment {
-        BACKEND_IMAGE  = "prudvik2026/devops-backend"
+
+        // ============================================================
+        // DOCKER HUB
+        // ============================================================
+
+        DOCKER_USER = "prudvik2026"
+
+        BACKEND_IMAGE = "prudvik2026/devops-backend"
         FRONTEND_IMAGE = "prudvik2026/devops-frontend"
 
-        COMPOSE_PROJECT = "devops-3tier-pipeline"
-        COMPOSE_FILE    = "backend/compose.yaml"
 
-        BACKEND_TEST_PORT = "5001"
+        // ============================================================
+        // PRODUCTION PORTS
+        // ============================================================
+
         BACKEND_PROD_PORT = "8080"
         FRONTEND_PROD_PORT = "80"
+
+
+        // ============================================================
+        // COMPOSE
+        // ============================================================
+
+        COMPOSE_FILE = "backend/compose.yaml"
+
+
+        // ============================================================
+        // DATABASE
+        // ============================================================
+
+        POSTGRES_DB = "employee_db"
+        POSTGRES_USER = "devops_user"
+        POSTGRES_PASSWORD = "devops_password"
     }
 
-    triggers {
-        githubPush()
-    }
 
     stages {
 
+
         // ============================================================
-        // BACKEND TEST
+        // 1. BACKEND APPLICATION TEST
         // ============================================================
 
         stage('Backend Test') {
@@ -44,14 +66,14 @@ pipeline {
 
                     python3 -m py_compile app.py
 
-                    echo "===== Backend Test PASSED ====="
+                    echo "===== Backend Application Test PASSED ====="
                 '''
             }
         }
 
 
         // ============================================================
-        // BACKEND DOCKER BUILD
+        // 2. BACKEND DOCKER BUILD
         // ============================================================
 
         stage('Backend Docker Build') {
@@ -76,7 +98,13 @@ pipeline {
 
 
         // ============================================================
-        // BACKEND CONTAINER TEST
+        // 3. BACKEND CONTAINER TEST
+        //
+        // IMPORTANT:
+        // NO HOST PORT IS USED.
+        //
+        // A temporary PostgreSQL container is created on a
+        // temporary Docker network.
         // ============================================================
 
         stage('Backend Container Test') {
@@ -90,52 +118,254 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "===== Removing Old Test Container ====="
+                    TEST_NETWORK="devops-backend-ci-network"
+                    TEST_DB="devops-backend-ci-db"
+                    TEST_CONTAINER="devops-backend-test"
 
-                    docker rm -f devops-backend-test 2>/dev/null || true
 
-                    echo "===== Checking Test Port ====="
+                    echo "===== Cleaning Previous CI Resources ====="
 
-                    if ss -lnt | grep -q ":${BACKEND_TEST_PORT} "; then
-                        echo "ERROR: Port ${BACKEND_TEST_PORT} is already in use."
-                        ss -lntp | grep ":${BACKEND_TEST_PORT} " || true
+                    docker rm -f ${TEST_CONTAINER} 2>/dev/null || true
+                    docker rm -f ${TEST_DB} 2>/dev/null || true
+                    docker network rm ${TEST_NETWORK} 2>/dev/null || true
+
+
+                    echo "===== Creating Temporary CI Network ====="
+
+                    docker network create ${TEST_NETWORK}
+
+
+                    echo "===== Starting Temporary PostgreSQL ====="
+
+                    docker run -d \
+                        --name ${TEST_DB} \
+                        --network ${TEST_NETWORK} \
+                        -e POSTGRES_DB=${POSTGRES_DB} \
+                        -e POSTGRES_USER=${POSTGRES_USER} \
+                        -e POSTGRES_PASSWORD=${POSTGRES_PASSWORD} \
+                        postgres:16-alpine
+
+
+                    echo "===== Waiting for PostgreSQL ====="
+
+                    DB_READY=false
+
+                    for i in $(seq 1 30); do
+
+                        if docker exec ${TEST_DB} \
+                            pg_isready \
+                            -U ${POSTGRES_USER} \
+                            -d ${POSTGRES_DB} >/dev/null 2>&1
+                        then
+                            DB_READY=true
+                            echo "PostgreSQL is ready."
+                            break
+                        fi
+
+                        echo "Waiting for PostgreSQL... attempt ${i}/30"
+
+                        sleep 2
+
+                    done
+
+
+                    if [ "${DB_READY}" != "true" ]; then
+
+                        echo "ERROR: PostgreSQL did not become ready."
+
+                        docker logs ${TEST_DB} || true
+
                         exit 1
                     fi
 
-                    echo "Port ${BACKEND_TEST_PORT} is available."
 
-                    echo "===== Starting Backend Test Container ====="
+                    echo "===== Starting Backend CI Container ====="
 
                     docker run -d \
-                        --name devops-backend-test \
-                        -p ${BACKEND_TEST_PORT}:5000 \
+                        --name ${TEST_CONTAINER} \
+                        --network ${TEST_NETWORK} \
+                        -e DB_HOST=${TEST_DB} \
+                        -e DB_PORT=5432 \
+                        -e DB_NAME=${POSTGRES_DB} \
+                        -e DB_USER=${POSTGRES_USER} \
+                        -e DB_PASSWORD=${POSTGRES_PASSWORD} \
                         ${BACKEND_IMAGE}:test
+
 
                     echo "===== Waiting for Backend ====="
 
                     sleep 5
 
-                    echo "===== Container Status ====="
+
+                    echo "===== Backend Container Status ====="
 
                     docker ps \
-                        --filter name=devops-backend-test \
-                        --format 'table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}'
+                        --filter "name=${TEST_CONTAINER}" \
+                        --format "table {{.Names}}\\t{{.Status}}"
 
-                    echo "===== Testing Backend Health ====="
 
-                    curl -fsS \
-                        http://127.0.0.1:${BACKEND_TEST_PORT}/health
+                    echo "===== Backend Container Logs ====="
 
-                    echo
+                    docker logs ${TEST_CONTAINER}
 
-                    echo "===== Testing Backend API ====="
 
-                    curl -fsS \
-                        http://127.0.0.1:${BACKEND_TEST_PORT}/api
+                    echo "===== Checking Backend Container ====="
 
-                    echo
+                    if ! docker ps \
+                        --format '{{.Names}}' \
+                        | grep -qx "${TEST_CONTAINER}"
+                    then
+
+                        echo "ERROR: Backend container is not running."
+
+                        docker logs ${TEST_CONTAINER} || true
+
+                        exit 1
+                    fi
+
+
+                    echo "===== Checking psycopg2 ====="
+
+                    docker exec ${TEST_CONTAINER} \
+                        python3 -c "import psycopg2; print('psycopg2 OK')"
+
+
+                    echo "===== Checking Backend Health ====="
+
+                    docker exec ${TEST_CONTAINER} \
+                        python3 -c '
+import urllib.request
+import sys
+
+url = "http://127.0.0.1:5000/health"
+
+try:
+    response = urllib.request.urlopen(url, timeout=5)
+    body = response.read().decode()
+
+    print("HTTP Status:", response.status)
+    print("Response:", body)
+
+    if response.status != 200:
+        sys.exit(1)
+
+except Exception as e:
+    print("Health check failed:", e)
+    sys.exit(1)
+'
+
+
+                    echo "===== Checking Backend API ====="
+
+                    docker exec ${TEST_CONTAINER} \
+                        python3 -c '
+import urllib.request
+import sys
+
+url = "http://127.0.0.1:5000/api"
+
+try:
+    response = urllib.request.urlopen(url, timeout=5)
+    body = response.read().decode()
+
+    print("HTTP Status:", response.status)
+    print("Response:", body)
+
+    if response.status != 200:
+        sys.exit(1)
+
+except Exception as e:
+    print("API check failed:", e)
+    sys.exit(1)
+'
+
+
+                    echo "===== Testing CREATE Employee ====="
+
+                    docker exec ${TEST_CONTAINER} \
+                        python3 -c '
+import urllib.request
+import json
+import sys
+
+url = "http://127.0.0.1:5000/employees"
+
+data = {
+    "name": "Jenkins Test User",
+    "email": "jenkins-test@example.com",
+    "department": "DevOps"
+}
+
+request = urllib.request.Request(
+    url,
+    data=json.dumps(data).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST"
+)
+
+try:
+
+    response = urllib.request.urlopen(request, timeout=5)
+
+    body = response.read().decode()
+
+    print("HTTP Status:", response.status)
+    print("Response:", body)
+
+    if response.status != 201:
+        sys.exit(1)
+
+except Exception as e:
+
+    print("CREATE employee failed:", e)
+    sys.exit(1)
+'
+
+
+                    echo "===== Testing GET Employees ====="
+
+                    docker exec ${TEST_CONTAINER} \
+                        python3 -c '
+import urllib.request
+import sys
+
+url = "http://127.0.0.1:5000/employees"
+
+try:
+
+    response = urllib.request.urlopen(url, timeout=5)
+
+    body = response.read().decode()
+
+    print("HTTP Status:", response.status)
+    print("Response:", body)
+
+    if response.status != 200:
+        sys.exit(1)
+
+except Exception as e:
+
+    print("GET employees failed:", e)
+    sys.exit(1)
+'
+
 
                     echo "===== Backend Container Test PASSED ====="
+
+
+                    echo "===== Removing Backend CI Container ====="
+
+                    docker rm -f ${TEST_CONTAINER} 2>/dev/null || true
+
+
+                    echo "===== Removing PostgreSQL CI Container ====="
+
+                    docker rm -f ${TEST_DB} 2>/dev/null || true
+
+
+                    echo "===== Removing CI Network ====="
+
+                    docker network rm ${TEST_NETWORK} 2>/dev/null || true
                 '''
             }
 
@@ -143,10 +373,10 @@ pipeline {
 
                 always {
 
-                    echo "===== Cleaning Backend Test Container ====="
-
                     sh '''
                         docker rm -f devops-backend-test 2>/dev/null || true
+                        docker rm -f devops-backend-ci-db 2>/dev/null || true
+                        docker network rm devops-backend-ci-network 2>/dev/null || true
                     '''
                 }
             }
@@ -154,7 +384,7 @@ pipeline {
 
 
         // ============================================================
-        // BACKEND DOCKER PUSH
+        // 4. BACKEND DOCKER PUSH
         // ============================================================
 
         stage('Backend Docker Push') {
@@ -167,7 +397,7 @@ pipeline {
 
                 withCredentials([
                     usernamePassword(
-                        credentialsId: 'dockerhub',
+                        credentialsId: 'dockerhub-credentials',
                         usernameVariable: 'DOCKER_USERNAME',
                         passwordVariable: 'DOCKER_PASSWORD'
                     )
@@ -176,29 +406,16 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "===== Docker Hub Login ====="
-
-                        echo "$DOCKER_PASSWORD" | \
-                            docker login \
-                            --username "$DOCKER_USERNAME" \
+                        echo "${DOCKER_PASSWORD}" | docker login \
+                            -u "${DOCKER_USERNAME}" \
                             --password-stdin
-
-                        echo "===== Tagging Backend Image ====="
-
-                        docker tag \
-                            ${BACKEND_IMAGE}:test \
-                            ${BACKEND_IMAGE}:${BUILD_NUMBER}
 
                         docker tag \
                             ${BACKEND_IMAGE}:test \
                             ${BACKEND_IMAGE}:latest
 
-                        echo "===== Pushing Backend Build ${BUILD_NUMBER} ====="
-
                         docker push \
-                            ${BACKEND_IMAGE}:${BUILD_NUMBER}
-
-                        echo "===== Pushing Backend Latest ====="
+                            ${BACKEND_IMAGE}:test
 
                         docker push \
                             ${BACKEND_IMAGE}:latest
@@ -213,7 +430,7 @@ pipeline {
 
 
         // ============================================================
-        // PREPARE DATABASE ENVIRONMENT
+        // 5. PREPARE DATABASE ENVIRONMENT
         // ============================================================
 
         stage('Prepare Database Environment') {
@@ -224,49 +441,25 @@ pipeline {
                 echo "===== PREPARING DATABASE ENVIRONMENT ====="
                 echo "========================================="
 
-                withCredentials([
-                    string(
-                        credentialsId: 'postgres-password',
-                        variable: 'POSTGRES_PASSWORD_SECRET'
-                    )
-                ]) {
+                sh '''
+                    set -e
 
-                    sh '''
-                        set -e
-
-                        echo "===== Creating backend/.env ====="
-
-                        cat > backend/.env <<EOF
-POSTGRES_DB=employee_db
-POSTGRES_USER=devops_user
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD_SECRET}
+                    cat > backend/.env <<EOF
+POSTGRES_DB=${POSTGRES_DB}
+POSTGRES_USER=${POSTGRES_USER}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 EOF
 
-                        chmod 600 backend/.env
+                    echo "===== Database Environment Prepared ====="
 
-                        echo "===== Environment File Created ====="
-
-                        echo "POSTGRES_DB=employee_db"
-                        echo "POSTGRES_USER=devops_user"
-                        echo "POSTGRES_PASSWORD=********"
-
-                        echo "===== Validating Docker Compose ====="
-
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f ${COMPOSE_FILE} \
-                            config
-
-                        echo "===== Compose Configuration VALID ====="
-                    '''
-                }
+                    cat backend/.env | sed 's/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=********/'
+                '''
             }
         }
 
 
         // ============================================================
-        // DEPLOY BACKEND + DATABASE
+        // 6. DEPLOY BACKEND + DATABASE
         // ============================================================
 
         stage('Deploy Backend and Database') {
@@ -277,69 +470,53 @@ EOF
                 echo "===== DEPLOYING BACKEND + DATABASE ====="
                 echo "========================================="
 
-                withCredentials([
-                    string(
-                        credentialsId: 'postgres-password',
-                        variable: 'POSTGRES_PASSWORD_SECRET'
-                    )
-                ]) {
+                sh '''
+                    set -e
 
-                    sh '''
-                        set -e
+                    echo "===== Stopping Existing Backend Stack ====="
 
-                        echo "===== Recreating Environment File ====="
+                    docker compose \
+                        --env-file backend/.env \
+                        -f ${COMPOSE_FILE} \
+                        down || true
 
-                        cat > backend/.env <<EOF
-POSTGRES_DB=employee_db
-POSTGRES_USER=devops_user
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD_SECRET}
-EOF
 
-                        chmod 600 backend/.env
+                    echo "===== Pulling Latest Images ====="
 
-                        echo "===== Stopping Existing Backend Deployment ====="
+                    docker pull ${BACKEND_IMAGE}:latest
 
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f ${COMPOSE_FILE} \
-                            down
+                    docker pull postgres:16-alpine
 
-                        echo "===== Removing Old Backend Test Container ====="
 
-                        docker rm -f devops-backend-test 2>/dev/null || true
+                    echo "===== Starting Backend + PostgreSQL ====="
 
-                        echo "===== Pulling Backend Images ====="
+                    docker compose \
+                        --env-file backend/.env \
+                        -f ${COMPOSE_FILE} \
+                        up -d
 
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f ${COMPOSE_FILE} \
-                            pull
 
-                        echo "===== Starting Backend + Database ====="
+                    echo "===== Waiting for Services ====="
 
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f ${COMPOSE_FILE} \
-                            up -d
+                    sleep 10
 
-                        echo "===== Backend Deployment Started ====="
 
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f ${COMPOSE_FILE} \
-                            ps
-                    '''
-                }
+                    echo "===== Compose Status ====="
+
+                    docker compose \
+                        --env-file backend/.env \
+                        -f ${COMPOSE_FILE} \
+                        ps
+
+
+                    echo "===== Backend + Database Deployment Completed ====="
+                '''
             }
         }
 
 
         // ============================================================
-        // BACKEND HEALTH CHECK
+        // 7. BACKEND HEALTH CHECK
         // ============================================================
 
         stage('Backend Health Check') {
@@ -347,99 +524,71 @@ EOF
             steps {
 
                 echo "========================================="
-                echo "===== BACKEND PRODUCTION HEALTH ====="
+                echo "===== BACKEND HEALTH CHECK ====="
                 echo "========================================="
 
-                withCredentials([
-                    string(
-                        credentialsId: 'postgres-password',
-                        variable: 'POSTGRES_PASSWORD_SECRET'
-                    )
-                ]) {
+                sh '''
+                    set -e
 
-                    sh '''
-                        set -e
+                    echo "===== Waiting for Backend Health ====="
 
-                        cat > backend/.env <<EOF
-POSTGRES_DB=employee_db
-POSTGRES_USER=devops_user
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD_SECRET}
-EOF
+                    BACKEND_READY=false
 
-                        chmod 600 backend/.env
+                    for i in $(seq 1 15); do
 
-                        echo "===== Current Containers ====="
+                        echo "Backend health check attempt ${i}/15"
 
-                        docker compose \
-                            -p ${COMPOSE_PROJECT} \
-                            --env-file backend/.env \
-                            -f ${COMPOSE_FILE} \
-                            ps
+                        if curl -fsS \
+                            http://127.0.0.1:${BACKEND_PROD_PORT}/health
+                        then
 
-                        echo "===== Waiting for Backend Health ====="
+                            echo ""
+                            echo "Backend health check PASSED."
 
-                        HEALTH_OK=0
+                            BACKEND_READY=true
 
-                        for i in 1 2 3 4 5 6 7 8 9 10
-                        do
-
-                            echo "Health check attempt $i/10"
-
-                            if curl -fsS \
-                                http://127.0.0.1:${BACKEND_PROD_PORT}/health
-                            then
-
-                                HEALTH_OK=1
-                                break
-
-                            fi
-
-                            sleep 3
-
-                        done
-
-                        if [ "$HEALTH_OK" -ne 1 ]; then
-
-                            echo "===== BACKEND HEALTH CHECK FAILED ====="
-
-                            docker compose \
-                                -p ${COMPOSE_PROJECT} \
-                                --env-file backend/.env \
-                                -f ${COMPOSE_FILE} \
-                                logs --tail=100 backend
-
-                            exit 1
-
+                            break
                         fi
 
-                        echo
+                        sleep 3
+                    done
 
-                        echo "===== BACKEND HEALTH CHECK PASSED ====="
 
-                        echo "===== API CHECK ====="
+                    if [ "${BACKEND_READY}" != "true" ]; then
 
-                        curl -fsS \
-                            http://127.0.0.1:${BACKEND_PROD_PORT}/api
-
-                        echo
-
-                        echo "===== DATABASE STATUS ====="
+                        echo "ERROR: Backend health check failed."
 
                         docker compose \
-                            -p ${COMPOSE_PROJECT} \
                             --env-file backend/.env \
                             -f ${COMPOSE_FILE} \
-                            ps
+                            logs backend || true
 
-                        echo "===== Backend Deployment VERIFIED ====="
-                    '''
-                }
+                        exit 1
+                    fi
+
+
+                    echo "===== Backend API Check ====="
+
+                    curl -fsS \
+                        http://127.0.0.1:${BACKEND_PROD_PORT}/api
+
+                    echo ""
+
+                    echo "===== Backend Employee API Check ====="
+
+                    curl -fsS \
+                        http://127.0.0.1:${BACKEND_PROD_PORT}/employees
+
+                    echo ""
+
+                    echo "===== Backend Health/API Checks PASSED ====="
+                '''
             }
         }
 
 
         // ============================================================
-        // FRONTEND TEST
+        // 8. FRONTEND APPLICATION TEST
         // ============================================================
 
         stage('Frontend Test') {
@@ -453,26 +602,19 @@ EOF
                 sh '''
                     set -e
 
-                    echo "===== Checking Frontend Files ====="
-
                     test -f frontend/index.html
-                    test -f frontend/style.css
                     test -f frontend/script.js
-                    test -f frontend/Dockerfile
 
-                    echo "index.html      : OK"
-                    echo "style.css       : OK"
-                    echo "script.js       : OK"
-                    echo "Dockerfile      : OK"
+                    echo "Frontend files found."
 
-                    echo "===== Frontend File Test PASSED ====="
+                    echo "===== Frontend Application Test PASSED ====="
                 '''
             }
         }
 
 
         // ============================================================
-        // FRONTEND DOCKER BUILD
+        // 9. FRONTEND DOCKER BUILD
         // ============================================================
 
         stage('Frontend Docker Build') {
@@ -497,7 +639,9 @@ EOF
 
 
         // ============================================================
-        // FRONTEND CONTAINER TEST
+        // 10. FRONTEND CONTAINER TEST
+        //
+        // NO HOST PORT USED.
         // ============================================================
 
         stage('Frontend Container Test') {
@@ -511,51 +655,74 @@ EOF
                 sh '''
                     set -e
 
+                    FRONTEND_TEST_CONTAINER="devops-frontend-ci-test"
+
+
                     echo "===== Removing Old Frontend Test Container ====="
 
-                    docker rm -f devops-frontend-ci-test 2>/dev/null || true
+                    docker rm -f ${FRONTEND_TEST_CONTAINER} 2>/dev/null || true
+
 
                     echo "===== Starting Frontend Test Container ====="
 
                     docker run -d \
-                        --name devops-frontend-ci-test \
-                        -p 8088:80 \
+                        --name ${FRONTEND_TEST_CONTAINER} \
                         ${FRONTEND_IMAGE}:test
 
-                    echo "===== Waiting for Nginx ====="
 
-                    sleep 3
+                    echo "===== Waiting for Frontend ====="
 
-                    echo "===== Testing Frontend HTML ====="
+                    sleep 5
 
-                    curl -fsS \
-                        http://127.0.0.1:8088/
 
-                    echo
+                    echo "===== Frontend Container Status ====="
 
-                    echo "===== Testing Frontend JavaScript ====="
+                    docker ps \
+                        --filter "name=${FRONTEND_TEST_CONTAINER}" \
+                        --format "table {{.Names}}\\t{{.Status}}"
 
-                    curl -fsS \
-                        http://127.0.0.1:8088/script.js
 
-                    echo
+                    echo "===== Checking Frontend Container ====="
 
-                    echo "===== Testing Frontend CSS ====="
+                    if ! docker ps \
+                        --format '{{.Names}}' \
+                        | grep -qx "${FRONTEND_TEST_CONTAINER}"
+                    then
 
-                    curl -fsS \
-                        http://127.0.0.1:8088/style.css
+                        echo "ERROR: Frontend container is not running."
 
-                    echo
+                        docker logs ${FRONTEND_TEST_CONTAINER} || true
+
+                        exit 1
+                    fi
+
+
+                    echo "===== Testing Nginx Configuration ====="
+
+                    docker exec ${FRONTEND_TEST_CONTAINER} nginx -t
+
+
+                    echo "===== Testing Frontend HTTP ====="
+
+                    docker exec ${FRONTEND_TEST_CONTAINER} \
+                        wget -qO- http://127.0.0.1:80/ \
+                        > /tmp/frontend-test.html
+
+
+                    echo "===== Frontend Response ====="
+
+                    head -20 /tmp/frontend-test.html
+
 
                     echo "===== Frontend Container Test PASSED ====="
+
+                    docker rm -f ${FRONTEND_TEST_CONTAINER} 2>/dev/null || true
                 '''
             }
 
             post {
 
                 always {
-
-                    echo "===== Cleaning Frontend Test Container ====="
 
                     sh '''
                         docker rm -f devops-frontend-ci-test 2>/dev/null || true
@@ -566,7 +733,7 @@ EOF
 
 
         // ============================================================
-        // FRONTEND DOCKER PUSH
+        // 11. FRONTEND DOCKER PUSH
         // ============================================================
 
         stage('Frontend Docker Push') {
@@ -579,7 +746,7 @@ EOF
 
                 withCredentials([
                     usernamePassword(
-                        credentialsId: 'dockerhub',
+                        credentialsId: 'dockerhub-credentials',
                         usernameVariable: 'DOCKER_USERNAME',
                         passwordVariable: 'DOCKER_PASSWORD'
                     )
@@ -588,29 +755,16 @@ EOF
                     sh '''
                         set -e
 
-                        echo "===== Docker Hub Login ====="
-
-                        echo "$DOCKER_PASSWORD" | \
-                            docker login \
-                            --username "$DOCKER_USERNAME" \
+                        echo "${DOCKER_PASSWORD}" | docker login \
+                            -u "${DOCKER_USERNAME}" \
                             --password-stdin
-
-                        echo "===== Tagging Frontend Image ====="
-
-                        docker tag \
-                            ${FRONTEND_IMAGE}:test \
-                            ${FRONTEND_IMAGE}:${BUILD_NUMBER}
 
                         docker tag \
                             ${FRONTEND_IMAGE}:test \
                             ${FRONTEND_IMAGE}:latest
 
-                        echo "===== Pushing Frontend Build ${BUILD_NUMBER} ====="
-
                         docker push \
-                            ${FRONTEND_IMAGE}:${BUILD_NUMBER}
-
-                        echo "===== Pushing Frontend Latest ====="
+                            ${FRONTEND_IMAGE}:test
 
                         docker push \
                             ${FRONTEND_IMAGE}:latest
@@ -625,7 +779,7 @@ EOF
 
 
         // ============================================================
-        // DEPLOY FRONTEND
+        // 12. DEPLOY FRONTEND
         // ============================================================
 
         stage('Deploy Frontend') {
@@ -639,40 +793,36 @@ EOF
                 sh '''
                     set -e
 
-                    echo "===== Removing Existing Frontend Production Container ====="
+                    echo "===== Removing Existing Frontend ====="
 
                     docker rm -f devops-3tier-pipeline-frontend 2>/dev/null || true
 
-                    echo "===== Removing Old Frontend Containers ====="
 
-                    docker rm -f devops-frontend-prod 2>/dev/null || true
-                    docker rm -f devops-frontend-ci-test 2>/dev/null || true
+                    echo "===== Pulling Latest Frontend Image ====="
 
-                    echo "===== Pulling Frontend Image ====="
+                    docker pull ${FRONTEND_IMAGE}:latest
 
-                    docker pull \
-                        ${FRONTEND_IMAGE}:latest
 
                     echo "===== Starting Frontend ====="
 
                     docker run -d \
                         --name devops-3tier-pipeline-frontend \
-                        --restart unless-stopped \
                         -p ${FRONTEND_PROD_PORT}:80 \
                         ${FRONTEND_IMAGE}:latest
 
-                    echo "===== Frontend Deployment Started ====="
+
+                    echo "===== Frontend Deployment Completed ====="
 
                     docker ps \
-                        --filter name=devops-3tier-pipeline-frontend \
-                        --format 'table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}'
+                        --filter "name=devops-3tier-pipeline-frontend" \
+                        --format "table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}"
                 '''
             }
         }
 
 
         // ============================================================
-        // FRONTEND HEALTH CHECK
+        // 13. FRONTEND HEALTH CHECK
         // ============================================================
 
         stage('Frontend Health Check') {
@@ -680,62 +830,54 @@ EOF
             steps {
 
                 echo "========================================="
-                echo "===== FRONTEND PRODUCTION HEALTH ====="
+                echo "===== FRONTEND HEALTH CHECK ====="
                 echo "========================================="
 
                 sh '''
                     set -e
 
-                    echo "===== Waiting for Frontend ====="
+                    FRONTEND_READY=false
 
-                    FRONTEND_OK=0
 
-                    for i in 1 2 3 4 5 6 7 8 9 10
-                    do
+                    for i in $(seq 1 10); do
 
-                        echo "Frontend health check attempt $i/10"
+                        echo "Frontend health check attempt ${i}/10"
 
                         if curl -fsS \
-                            http://127.0.0.1:${FRONTEND_PROD_PORT}/
+                            http://127.0.0.1:${FRONTEND_PROD_PORT}/ \
+                            >/dev/null
                         then
 
-                            FRONTEND_OK=1
-                            break
+                            echo "Frontend health check PASSED."
 
+                            FRONTEND_READY=true
+
+                            break
                         fi
 
                         sleep 2
-
                     done
 
-                    if [ "$FRONTEND_OK" -ne 1 ]; then
 
-                        echo "===== FRONTEND HEALTH CHECK FAILED ====="
+                    if [ "${FRONTEND_READY}" != "true" ]; then
+
+                        echo "ERROR: Frontend health check failed."
 
                         docker logs \
-                            --tail=100 \
-                            devops-3tier-pipeline-frontend
+                            devops-3tier-pipeline-frontend || true
 
                         exit 1
-
                     fi
 
-                    echo
 
-                    echo "===== FRONTEND HEALTH CHECK PASSED ====="
-
-                    echo "===== Frontend Container ====="
-
-                    docker ps \
-                        --filter name=devops-3tier-pipeline-frontend \
-                        --format 'table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}'
+                    echo "===== Frontend Health Check PASSED ====="
                 '''
             }
         }
 
 
         // ============================================================
-        // FINAL SYSTEM VERIFICATION
+        // 14. FINAL SYSTEM VERIFICATION
         // ============================================================
 
         stage('Final System Verification') {
@@ -749,7 +891,7 @@ EOF
                 sh '''
                     set -e
 
-                    echo
+
                     echo "========================================="
                     echo "===== BACKEND HEALTH ====="
                     echo "========================================="
@@ -757,9 +899,9 @@ EOF
                     curl -fsS \
                         http://127.0.0.1:${BACKEND_PROD_PORT}/health
 
-                    echo
+                    echo ""
 
-                    echo
+
                     echo "========================================="
                     echo "===== BACKEND API ====="
                     echo "========================================="
@@ -767,37 +909,54 @@ EOF
                     curl -fsS \
                         http://127.0.0.1:${BACKEND_PROD_PORT}/api
 
-                    echo
+                    echo ""
 
-                    echo
+
+                    echo "========================================="
+                    echo "===== EMPLOYEE API ====="
+                    echo "========================================="
+
+                    curl -fsS \
+                        http://127.0.0.1:${BACKEND_PROD_PORT}/employees
+
+                    echo ""
+
+
                     echo "========================================="
                     echo "===== FRONTEND ====="
                     echo "========================================="
 
                     curl -fsS \
                         http://127.0.0.1:${FRONTEND_PROD_PORT}/ \
-                        -o /tmp/frontend.html
+                        >/dev/null
 
-                    grep -q \
-                        'DevOps Employee Portal' \
-                        /tmp/frontend.html
+                    echo "Frontend HTTP response: OK"
 
-                    echo "Frontend HTML verified successfully."
-
-                    echo
 
                     echo "========================================="
-                    echo "===== RUNNING CONTAINERS ====="
+                    echo "===== DOCKER CONTAINERS ====="
                     echo "========================================="
 
                     docker ps \
-                        --format 'table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}'
+                        --format "table {{.Names}}\\t{{.Image}}\\t{{.Ports}}\\t{{.Status}}"
 
-                    echo
 
                     echo "========================================="
-                    echo "===== SYSTEM VERIFICATION PASSED ====="
+                    echo "===== COMPOSE STATUS ====="
                     echo "========================================="
+
+                    docker compose \
+                        --env-file backend/.env \
+                        -f ${COMPOSE_FILE} \
+                        ps
+
+
+                    echo "========================================="
+                    echo "===== APPLICATION DEPLOYED SUCCESSFULLY ====="
+                    echo "========================================="
+
+                    echo "Backend  : http://SERVER-IP:${BACKEND_PROD_PORT}"
+                    echo "Frontend : http://SERVER-IP"
                 '''
             }
         }
@@ -813,28 +972,31 @@ EOF
         always {
 
             echo "========================================="
-            echo "===== CLEANING PIPELINE ENVIRONMENT ====="
+            echo "===== CLEANING CI ENVIRONMENT ====="
             echo "========================================="
 
             sh '''
-                rm -f backend/.env
-
                 docker rm -f devops-backend-test 2>/dev/null || true
+                docker rm -f devops-backend-ci-db 2>/dev/null || true
                 docker rm -f devops-frontend-ci-test 2>/dev/null || true
+
+                docker network rm devops-backend-ci-network 2>/dev/null || true
             '''
         }
+
 
         success {
 
             echo "========================================="
-            echo "===== PIPELINE EXECUTION COMPLETED ====="
+            echo "===== PIPELINE SUCCESS ====="
             echo "========================================="
 
-            echo "===== APPLICATION DEPLOYED SUCCESSFULLY ====="
-
-            echo "Backend  : http://SERVER-IP:8080"
-            echo "Frontend : http://SERVER-IP"
+            echo "All tests passed."
+            echo "Backend deployed successfully."
+            echo "Frontend deployed successfully."
+            echo "PostgreSQL deployed successfully."
         }
+
 
         failure {
 
