@@ -1,12 +1,19 @@
 import os
+
 from flask import Flask, request
 from flask_cors import CORS
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
 
 app = Flask(__name__)
 CORS(app)
 
+
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
 
 def get_db_connection():
     return psycopg2.connect(
@@ -17,6 +24,10 @@ def get_db_connection():
         port=os.getenv("DB_PORT", "5432")
     )
 
+
+# ============================================================
+# DATABASE INITIALIZATION
+# ============================================================
 
 def init_db():
     conn = get_db_connection()
@@ -37,6 +48,10 @@ def init_db():
     finally:
         conn.close()
 
+
+# ============================================================
+# BASIC ENDPOINTS
+# ============================================================
 
 @app.route("/")
 def home():
@@ -71,6 +86,10 @@ def api():
     }
 
 
+# ============================================================
+# GET ALL EMPLOYEES
+# ============================================================
+
 @app.route("/employees", methods=["GET"])
 def get_employees():
     conn = get_db_connection()
@@ -90,6 +109,10 @@ def get_employees():
     finally:
         conn.close()
 
+
+# ============================================================
+# CREATE EMPLOYEE
+# ============================================================
 
 @app.route("/employees", methods=["POST"])
 def create_employee():
@@ -132,6 +155,10 @@ def create_employee():
         conn.close()
 
 
+# ============================================================
+# GET SINGLE EMPLOYEE
+# ============================================================
+
 @app.route("/employees/<int:employee_id>", methods=["GET"])
 def get_employee(employee_id):
     conn = get_db_connection()
@@ -154,6 +181,10 @@ def get_employee(employee_id):
     finally:
         conn.close()
 
+
+# ============================================================
+# UPDATE EMPLOYEE
+# ============================================================
 
 @app.route("/employees/<int:employee_id>", methods=["PUT"])
 def update_employee(employee_id):
@@ -204,6 +235,10 @@ def update_employee(employee_id):
         conn.close()
 
 
+# ============================================================
+# DELETE EMPLOYEE
+# ============================================================
+
 @app.route("/employees/<int:employee_id>", methods=["DELETE"])
 def delete_employee(employee_id):
     conn = get_db_connection()
@@ -233,6 +268,15 @@ def delete_employee(employee_id):
         conn.close()
 
 
+# ============================================================
+# APPLICATION START
+# ============================================================
+
+# Initialize database when application starts
+init_db()
+
 if __name__ == "__main__":
-    init_db()
-    app.run(host="0.0.0.0", port=5000)
+    app.run(
+        host="0.0.0.0",
+        port=5000
+    )
